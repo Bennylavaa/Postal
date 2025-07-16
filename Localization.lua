@@ -72,6 +72,7 @@ L["Not taking more items as there are now only %d regular bagslots free."] = tru
 L["Open"] = true
 L["OpenAll"] = true
 L["Open All"] = true
+L["Open all Auction pending mail"] = true
 L["Open all Auction cancelled mail"] = true
 L["Open all Auction expired mail"] = true
 L["Open all Auction successful mail"] = true

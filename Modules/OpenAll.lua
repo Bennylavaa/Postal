@@ -15,20 +15,31 @@ local wait
 local button
 local Postal_OpenAllMenuButton
 local skipFlag
-local invFull
+local invFull, invAlmostFull
 local openAllOverride
+local PendingDel
 
 -- Frame to process opening mail
 local updateFrame = CreateFrame("Frame")
 updateFrame:Hide()
 updateFrame:SetScript("OnShow", function(self)
 	self.time = Postal.db.profile.OpenSpeed
+	if invAlmostFull and self.time < 1.0 and not self.lootingMoney then
+		self.time = 1.0
+	end
+	self.lootingMoney = nil
 end)
 updateFrame:SetScript("OnUpdate", function(self, elapsed)
 	self.time = self.time - elapsed
 	if self.time <= 0 then
 		self:Hide()
 		Postal_OpenAll:ProcessNext()
+	end
+end)
+updateFrame:SetScript("OnEvent", function(self, event, ...)
+	if event == "MAIL_INBOX_UPDATE" and PendingDel then
+		PendingDel = false
+		updateFrame:Show()
 	end
 end)
 
@@ -38,18 +49,25 @@ end)
 local refreshFrame = CreateFrame("Frame", nil, MailFrame)
 refreshFrame:Hide()
 refreshFrame:SetScript("OnShow", function(self)
-	self.time = 10
+	self.time = 5
+    self.mode = nil
 end)
 refreshFrame:SetScript("OnUpdate", function(self, elapsed)
 	self.time = self.time - elapsed
 	if self.time <= 0 then
-		self.time = 10
-		Postal:Print(L["Refreshing mailbox..."])
-		CheckInbox()
-		local current, total = GetInboxNumItems()
-		if current == 50 or current == total then
-			-- If we're here, then mailbox contains a full fresh 50 or
-			-- we're showing all the mail we have, so continue open all
+		if self.mode == nil then
+			self.time = 5
+			Postal:Print(L["Refreshing mailbox..."])
+			CheckInbox()
+			local current, total = GetInboxNumItems()
+			if current == 50 or current == total then
+				-- If we're here, then mailbox contains a full fresh 50 or
+				-- we're showing all the mail we have. Continue OpenAll in
+				-- 1 second(s) to allow for other addons to do stuff.
+				self.time = 1
+				self.mode = 1
+			end
+		else
 			self:Hide()
 			Postal_OpenAll:OpenAll(true)
 		end
@@ -107,6 +125,7 @@ end
 function Postal_OpenAll:MAIL_SHOW()
 	self:RegisterEvent("MAIL_CLOSED", "Reset")
 	self:RegisterEvent("PLAYER_LEAVING_WORLD", "Reset")
+	updateFrame:RegisterEvent("MAIL_INBOX_UPDATE")
 end
 
 function Postal_OpenAll:OpenAll(isRecursive)
@@ -116,6 +135,7 @@ function Postal_OpenAll:OpenAll(isRecursive)
 	mailIndex = origNumItems
 	attachIndex = ATTACHMENTS_MAX_RECEIVE
 	invFull = nil
+	invAlmostFull = nil
 	skipFlag = false
 	lastItem = false
 	lastNumAttach = nil
@@ -195,6 +215,14 @@ function Postal_OpenAll:ProcessNext()
 			end
 		end
 
+		-- Delete pending mail
+		if mailType == "AHPending" and Postal.db.profile.OpenAll[mailType] then
+			PendingDel = true
+			DeleteInboxItem(mailIndex)
+			mailIndex = mailIndex - 1
+			do return end
+		end
+
 		-- Print message on next mail
 		if Postal.db.profile.OpenAll.SpamChat and attachIndex == ATTACHMENTS_MAX_RECEIVE then
 			if not invFull or msgMoney > 0 then
@@ -209,21 +237,48 @@ function Postal_OpenAll:ProcessNext()
 		end
 
 		-- Check for free bag space
-		if attachIndex > 0 and not invFull and Postal.db.profile.OpenAll.KeepFreeSpace>0 then
-			local free=0
-			for bag=0,NUM_BAG_SLOTS do
-				local bagFree,bagFam = GetContainerNumFreeSlots(bag)
-				if bagFam==0 then
-					free = free + bagFree
-				end
-			end
-			if free <= Postal.db.profile.OpenAll.KeepFreeSpace then
-				invFull = true
-				Postal:Print(format(L["Not taking more items as there are now only %d regular bagslots free."], free))
-			end
-		end
+        if attachIndex > 0 and not invFull and Postal.db.profile.OpenAll.KeepFreeSpace>0 then
+        	local free=0
+        	for bag=0,NUM_BAG_SLOTS do
+        		local bagFree,bagFam = GetContainerNumFreeSlots(bag)
+        		if bagFam==0 then
+        			free = free + bagFree
+        		end
+        	end
+        	if free <= Postal.db.profile.OpenAll.KeepFreeSpace then
+        		invFull = true
+        		invAlmostFull = nil
+        		Postal:Print(format(L["Not taking more items as there are now only %d regular bagslots free."], free))
+        	elseif free <= Postal.db.profile.OpenAll.KeepFreeSpace + 1 then
+        		invAlmostFull = true
+        	end
+        end
 
-		if attachIndex > 0 and not invFull then
+        -- If inventory is full, check if the item to be looted can stack with an existing stack
+        local lootFlag = false
+        if attachIndex > 0 and invFull then
+        	local name, itemTexture, count, quality, canUse = GetInboxItem(mailIndex, attachIndex)
+        	local link = GetInboxItemLink(mailIndex, attachIndex)
+        	local itemID = strmatch(link, "item:(%d+)")
+        	local stackSize = select(8, GetItemInfo(link))
+        	if itemID and stackSize and GetItemCount(itemID) > 0 then
+        		for bag = 0, NUM_BAG_SLOTS do
+        			for slot = 1, GetContainerNumSlots(bag) do
+        				local texture2, count2, locked2, quality2, readable2, lootable2, link2 = GetContainerItemInfo(bag, slot)
+        				if link2 then
+        					local itemID2 = strmatch(link2, "item:(%d+)")
+        					if itemID == itemID2 and count + count2 <= stackSize then
+        						lootFlag = true
+        						break
+        					end
+        				end
+        			end
+        			if lootFlag then break end
+        		end
+        	end
+        end
+
+		if attachIndex > 0 and (lootFlag or not invFull) then
 			-- If there's attachments, take the item
 			--Postal:Print("Getting Item from Message "..mailIndex..", "..attachIndex)
 			TakeInboxItem(mailIndex, attachIndex)
@@ -245,7 +300,7 @@ function Postal_OpenAll:ProcessNext()
 
 			lastNumAttach, lastNumGold = Postal:CountItemsAndMoney()
 			wait = true
-
+            updateFrame.lootingMoney = true
 			updateFrame:Show()
 		else
 			-- Mail has no item or money, go to next mail
@@ -290,6 +345,7 @@ function Postal_OpenAll:Reset(event)
 	if event == "MAIL_CLOSED" or event == "PLAYER_LEAVING_WORLD" then
 		self:UnregisterEvent("MAIL_CLOSED")
 		self:UnregisterEvent("PLAYER_LEAVING_WORLD")
+		updateFrame:UnregisterEvent("MAIL_INBOX_UPDATE")  -- ADD THIS LINE
 	end
 end
 
@@ -368,6 +424,11 @@ function Postal_OpenAll.ModuleMenu(self, level)
 			info.checked = db.AHWon
 			UIDropDownMenu_AddButton(info, level)
 
+			info.text = L["Open all Auction pending mail"]
+			info.arg2 = "AHPending"
+			info.checked = db.AHPending
+			UIDropDownMenu_AddButton(info, level)
+
 		elseif UIDROPDOWNMENU_MENU_VALUE == "NeutralAHMail" then
 			info.text = L["Open all Auction cancelled mail"]
 			info.arg2 = "NeutralAHCancelled"
@@ -392,6 +453,11 @@ function Postal_OpenAll.ModuleMenu(self, level)
 			info.text = L["Open all Auction won mail"]
 			info.arg2 = "NeutralAHWon"
 			info.checked = db.NeutralAHWon
+			UIDropDownMenu_AddButton(info, level)
+
+			info.text = L["Open all Auction pending mail"]
+			info.arg2 = "NeutralAHPending"
+			info.checked = db.NeutralAHPending
 			UIDropDownMenu_AddButton(info, level)
 
 		elseif UIDROPDOWNMENU_MENU_VALUE == "NonAHMail" then
